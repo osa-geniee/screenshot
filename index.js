@@ -1,5 +1,7 @@
-const playwright = require("playwright-aws-lambda");
+const { launchChromium } = require("playwright-aws-lambda");
 const AWS = require("aws-sdk");
+const http = require("http");
+const fs = require("fs");
 require("dotenv").config();
 
 AWS.config.update({
@@ -11,27 +13,78 @@ AWS.config.update({
 });
 const S3 = new AWS.S3();
 const bucket = process.env.S3_BUCKET_NAME;
+const num_images = 30;
+
+const pageOptions = {
+  extraHTTPHeaders: { "Accept-Language": "ja" },
+  userAgent:
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.81 Safari/537.36",
+  viewport: {
+    width: 640,
+    height: 360,
+    deviceScaleFactor: 1,
+  },
+};
 
 exports.handler = async (event) => {
   let url = null;
-  if (event["url"]) {
+  if (event.queryStringParameters && "url" in event.queryStringParameters) {
+    url = event.queryStringParameters.url;
+  } else if (event["url"]) {
     url = event["url"];
   }
 
-  const browser = await playwright.launchChromium();
-
-  const context = await browser.newContext();
-
-  const page = await context.newPage();
-
   if (url) {
-    await page.goto(url);
-    const screenshot = await page.screenshot();
+    let browser = await launchChromium();
+    let page = await browser.newPage(pageOptions);
 
-    for (let i = 0; i < 50; i++) {
+    await page.goto(url);
+    const html = await page.evaluate(() => {
+      return document.documentElement.outerHTML;
+    });
+    try {
+      await S3.putObject({
+        Bucket: bucket,
+        ContentType: "text/html",
+        Key: "html/target.html",
+        Body: html,
+      }).promise();
+    } catch (err) {
+      console.log(err);
+    }
+    await browser.close();
+
+    const data = await S3.getObject({
+      Bucket: bucket,
+      Key: "html/target.html",
+    }).promise();
+    const server = http.createServer((request, response) => {
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
+      response.write(data.Body);
+      response.end();
+    });
+    let images = [];
+
+    await server.listen("3000", "0.0.0.0");
+    browser = await launchChromium();
+    page = await browser.newPage(pageOptions);
+    const client = await page.context().newCDPSession(page);
+    await client.send("Network.emulateNetworkConditions", {
+      offline: false,
+      downloadThroughput: (15360 * 1000) / 8, // 15360kbps
+      uploadThroughput: (15360 * 1000) / 8, // 15360kbps
+      latency: 100,
+    });
+    page
+      .goto("http://localhost:3000", { timeout: 0 })
+      .then(() => {})
+      .catch(() => {});
+
+    for (let i = 0; i < num_images; i++) {
       await page.waitForTimeout(100);
+      const screenshot = await page.screenshot();
       const path =
-        url.replace(/\//g, "") +
+        url.replace(/(http|https):\/\//g, "") +
         `/screenshot_${String(i + 1).padStart(5, "0")}.jpg`;
       await S3.putObject({
         Bucket: bucket,
@@ -39,11 +92,23 @@ exports.handler = async (event) => {
         Key: path,
         Body: screenshot,
       }).promise();
-    }
 
+      images.push(
+        S3.getSignedUrl("getObject", {
+          Bucket: bucket,
+          Key: path,
+          Expires: 86400,
+        })
+      );
+    }
     await browser.close();
-    return { message: "Screenshot succeed" };
+    server.close();
+
+    return JSON.stringify({
+      message: "Screenshot succeed",
+      images: images,
+    });
   } else {
-    return { message: "Screenshot failed" };
+    return JSON.stringify({ message: "Screenshot failed" });
   }
 };
