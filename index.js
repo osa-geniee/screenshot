@@ -1,8 +1,6 @@
 const { launchChromium } = require("playwright-aws-lambda");
 const AWS = require("aws-sdk");
 const http = require("http");
-const fs = require("fs");
-const { addAbortSignal } = require("stream");
 require("dotenv").config();
 
 AWS.config.update({
