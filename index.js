@@ -2,6 +2,7 @@ const { launchChromium } = require("playwright-aws-lambda");
 const AWS = require("aws-sdk");
 const http = require("http");
 const fs = require("fs");
+const { addAbortSignal } = require("stream");
 require("dotenv").config();
 
 AWS.config.update({
@@ -27,45 +28,28 @@ const pageOptions = {
 };
 
 exports.handler = async (event) => {
-  let url = null;
-  if (event.queryStringParameters && "url" in event.queryStringParameters) {
-    url = event.queryStringParameters.url;
-  } else if (event["url"]) {
-    url = event["url"];
+  let html = null;
+  let domain = null;
+
+  if (event.body) {
+    const body = JSON.parse(event.body);
+    html = Buffer.from(body.html, "base64");
+    domain = body.domain;
   }
 
-  if (url) {
+  if (domain && html) {
     let browser = await launchChromium();
     let page = await browser.newPage(pageOptions);
 
-    await page.goto(url);
-    const html = await page.evaluate(() => {
-      return document.documentElement.outerHTML;
-    });
-    try {
-      await S3.putObject({
-        Bucket: bucket,
-        ContentType: "text/html",
-        Key: "html/target.html",
-        Body: html,
-      }).promise();
-    } catch (err) {
-      console.log(err);
-    }
-    await browser.close();
-
-    const data = await S3.getObject({
-      Bucket: bucket,
-      Key: "html/target.html",
-    }).promise();
-    const server = http.createServer((request, response) => {
+    const server = await http.createServer((request, response) => {
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.write(data.Body);
+      response.write(html);
       response.end();
     });
-    let images = [];
 
+    let images = [];
     await server.listen("3000", "0.0.0.0");
+
     browser = await launchChromium();
     page = await browser.newPage(pageOptions);
     const client = await page.context().newCDPSession(page);
@@ -84,8 +68,8 @@ exports.handler = async (event) => {
       await page.waitForTimeout(100);
       const screenshot = await page.screenshot();
       const path =
-        url.replace(/(http|https):\/\//g, "") +
-        `/screenshot_${String(i + 1).padStart(5, "0")}.jpg`;
+        domain.replace(/(http|https):\/\//g, "") +
+        `/before/screenshot_${String(i + 1).padStart(5, "0")}.jpg`;
       await S3.putObject({
         Bucket: bucket,
         ContentType: "image/jpeg",
@@ -104,11 +88,11 @@ exports.handler = async (event) => {
     await browser.close();
     server.close();
 
-    return JSON.stringify({
+    return {
       message: "Screenshot succeed",
       images: images,
-    });
+    };
   } else {
-    return JSON.stringify({ message: "Screenshot failed" });
+    return { message: "Screenshot failed" };
   }
 };
