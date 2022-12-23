@@ -12,7 +12,7 @@ AWS.config.update({
 });
 const S3 = new AWS.S3();
 const bucket = process.env.S3_BUCKET_NAME;
-const num_images = 30;
+const num_images = Number(process.env.NUM_IMAGES);
 
 const pageOptions = {
   extraHTTPHeaders: { "Accept-Language": "ja" },
@@ -27,15 +27,15 @@ const pageOptions = {
 
 exports.handler = async (event) => {
   let html = null;
-  let domain = null;
+  let dir = null;
 
   if (event.body) {
     const body = JSON.parse(event.body);
     html = Buffer.from(body.html, "base64");
-    domain = body.domain;
+    dir = body.dir;
   }
 
-  if (domain && html) {
+  if (dir && html) {
     let browser = await launchChromium();
     let page = await browser.newPage(pageOptions);
 
@@ -62,27 +62,30 @@ exports.handler = async (event) => {
       .then(() => {})
       .catch(() => {});
 
+    let paths = [];
+    let shots = [];
     for (let i = 0; i < num_images; i++) {
       await page.waitForTimeout(100);
-      const screenshot = await page.screenshot();
-      const path =
-        domain.replace(/(http|https):\/\//g, "") +
-        `/before/screenshot_${String(i + 1).padStart(5, "0")}.jpg`;
+      shots.push(await page.screenshot());
+      paths.push(dir + `/screenshot_${String(i + 1).padStart(5, "0")}.jpg`);
+    }
+    for (let i = 0; i < num_images; i++) {
       await S3.putObject({
         Bucket: bucket,
         ContentType: "image/jpeg",
-        Key: path,
-        Body: screenshot,
+        Key: paths[i],
+        Body: shots[i],
       }).promise();
 
       images.push(
         S3.getSignedUrl("getObject", {
           Bucket: bucket,
-          Key: path,
+          Key: paths[i],
           Expires: 86400,
         })
       );
     }
+
     await browser.close();
     server.close();
 
