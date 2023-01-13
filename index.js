@@ -1,6 +1,8 @@
-const { launchChromium } = require("playwright-aws-lambda");
+const playwright = require("playwright-aws-lambda");
 const AWS = require("aws-sdk");
 const http = require("http");
+const url = require("url");
+const cheerio = require("cheerio");
 require("dotenv").config();
 
 AWS.config.update({
@@ -26,29 +28,48 @@ const pageOptions = {
 };
 
 exports.handler = async (event) => {
+  await playwright.loadFont(
+    "https://raw.githack.com/minoryorg/Noto-Sans-CJK-JP/master/fonts/NotoSansCJKjp-Regular.ttf"
+  );
+
   let html = null;
   let dir = null;
+  let base_url = null;
 
   if (event.body) {
     const body = JSON.parse(event.body);
     html = Buffer.from(body.html, "base64");
     dir = body.dir;
+    base_url = body.base_url;
   }
 
   if (dir && html) {
-    let browser = await launchChromium();
+    let browser = await playwright.launchChromium();
     let page = await browser.newPage(pageOptions);
+    const $ = cheerio.load(html);
+    $("*").each(function () {
+      let src = $(this).attr("src");
+      let href = $(this).attr("href");
+      if (src) {
+        src = new url.URL(src, base_url);
+        $(this).attr("src", src);
+      }
+      if (href) {
+        href = new url.URL(href, base_url);
+        $(this).attr("href", href);
+      }
+    });
 
     const server = await http.createServer((request, response) => {
       response.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
-      response.write(html);
+      response.write($.html());
       response.end();
     });
 
     let images = [];
     await server.listen("3000", "0.0.0.0");
 
-    browser = await launchChromium();
+    browser = await playwright.launchChromium();
     page = await browser.newPage(pageOptions);
     const client = await page.context().newCDPSession(page);
     await client.send("Network.emulateNetworkConditions", {
